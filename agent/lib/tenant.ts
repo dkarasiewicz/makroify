@@ -98,6 +98,14 @@ export class EnvTenantResolver implements TenantResolver {
       loginMethod: process.env.MAKRO_LOGIN_METHOD === "direct" ? "direct" : "browser",
       browser: {
         headless: process.env.MAKRO_HEADLESS !== "0",
+        // Optional real browser (e.g. "chrome" / "msedge") if installed.
+        channel: process.env.MAKRO_BROWSER_CHANNEL || undefined,
+        // Persistent profile → keeps Akamai trust cookies across logins.
+        // Set MAKRO_USER_DATA_DIR="" to disable.
+        userDataDir:
+          process.env.MAKRO_USER_DATA_DIR === ""
+            ? undefined
+            : (process.env.MAKRO_USER_DATA_DIR ?? join(storeDir, "browser-profile")),
         ...(await serverlessBrowser()),
       },
       overrides: {

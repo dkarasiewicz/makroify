@@ -20,6 +20,13 @@ export interface BrowserLoginOptions {
   executablePath?: string;
   /** Extra launch args, e.g. `chromium.args` from `@sparticuz/chromium`. */
   extraArgs?: string[];
+  /**
+   * Persist the browser profile to this directory. Keeps Akamai's trust cookies
+   * (`_abck`/`bm_sz`) and the device fingerprint across logins, so after one
+   * successful login the browser is "known" and later logins face far fewer bot
+   * challenges. Recommended for local/long-running use.
+   */
+  userDataDir?: string;
 }
 
 const DEFAULT_UA =
@@ -40,18 +47,25 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
   return async (creds: Credentials): Promise<ProvidedSession> => {
     const { chromium } = await loadPlaywright();
     const timeout = opts.timeoutMs ?? 60_000;
-    const browser = await chromium.launch({
+    const launchOpts = {
       headless: opts.headless ?? true,
       channel: opts.channel,
       executablePath: opts.executablePath,
       args: ["--disable-blink-features=AutomationControlled", ...(opts.extraArgs ?? [])],
-    });
+    };
+    const contextOpts = { locale: "pl-PL", userAgent: opts.userAgent ?? DEFAULT_UA };
+
+    // A persistent profile reuses Akamai trust cookies/fingerprint across logins.
+    let browser: import("playwright").Browser | null = null;
+    let ctx: import("playwright").BrowserContext;
+    if (opts.userDataDir) {
+      ctx = await chromium.launchPersistentContext(opts.userDataDir, { ...launchOpts, ...contextOpts });
+    } else {
+      browser = await chromium.launch(launchOpts);
+      ctx = await browser.newContext(contextOpts);
+    }
     try {
-      const ctx = await browser.newContext({
-        locale: "pl-PL",
-        userAgent: opts.userAgent ?? DEFAULT_UA,
-      });
-      const page = await ctx.newPage();
+      const page = ctx.pages()[0] ?? (await ctx.newPage());
       page.setDefaultTimeout(timeout);
 
       // Capture the ordercapture JWT the SPA receives after login.
@@ -98,7 +112,8 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
 
       return { jwt, cookies };
     } finally {
-      await browser.close();
+      await ctx.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
     }
   };
 }

@@ -79,6 +79,16 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
         }
       });
 
+      // Warm up on the shop first (lets Akamai's sensor run, accept cookies) so
+      // the login looks like a normal browsing session rather than a cold hit.
+      try {
+        await page.goto("https://dlagastronomii.makro.pl/", { waitUntil: "domcontentloaded" });
+        await dismissCookieBanner(page);
+        await page.waitForTimeout(800);
+      } catch {
+        /* warm-up is best-effort */
+      }
+
       const signinUrl = buildSigninUrl({
         userId: creds.userId,
         password: creds.password,
@@ -88,10 +98,13 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
       });
 
       await page.goto(signinUrl, { waitUntil: "domcontentloaded" });
+      await dismissCookieBanner(page);
       await page.waitForSelector("#user_id", { state: "visible" });
       await page.fill("#user_id", creds.userId);
       await page.fill("#password", creds.password);
-      await page.click("#submit");
+      // A late cookie banner can intercept the submit click — dismiss, then click.
+      await dismissCookieBanner(page);
+      await clickSubmit(page);
 
       await page
         .waitForResponse((r) => r.url().includes("loginWithIdamAccessToken") && r.status() === 200, { timeout })
@@ -116,6 +129,51 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
       if (browser) await browser.close().catch(() => {});
     }
   };
+}
+
+/** Accept a cookie-consent banner if present (best-effort, common frameworks + PL/EN). */
+async function dismissCookieBanner(page: import("playwright").Page): Promise<void> {
+  const selectors = [
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+    "[data-testid*='accept' i]",
+    "[id*='accept-all' i]",
+    "[class*='accept-all' i]",
+  ];
+  for (const sel of selectors) {
+    try {
+      const el = page.locator(sel).first();
+      if ((await el.count()) && (await el.isVisible())) {
+        await el.click({ timeout: 2000 });
+        await page.waitForTimeout(200);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  for (const re of [/zaakceptuj wszystk/i, /akceptuj/i, /zgadzam si/i, /accept all/i, /accept/i]) {
+    try {
+      const btn = page.getByRole("button", { name: re }).first();
+      if ((await btn.count()) && (await btn.isVisible())) {
+        await btn.click({ timeout: 2000 });
+        await page.waitForTimeout(200);
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+/** Click the login button, retrying with force after re-dismissing a late banner. */
+async function clickSubmit(page: import("playwright").Page): Promise<void> {
+  try {
+    await page.click("#submit", { timeout: 5000 });
+  } catch {
+    await dismissCookieBanner(page);
+    await page.click("#submit", { timeout: 5000, force: true });
+  }
 }
 
 /** Best-effort extraction of a visible login error message. */

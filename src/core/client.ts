@@ -129,14 +129,17 @@ export class MakroClient {
     if (this.session && this.http && !isExpired(this.session)) return this.session;
 
     const loaded = this.session ?? (await this.store.load());
-    if (!loaded) throw new NotAuthenticatedError();
-    if (isExpired(loaded)) {
-      // Try a transparent re-login if we have credentials.
+
+    // No session yet, or it expired: log in transparently when we have
+    // credentials (the agent path). Otherwise tell the user to log in.
+    if (!loaded || isExpired(loaded)) {
       if (this.credentials) {
         await this.login();
         return this.session!;
       }
-      throw new NotAuthenticatedError("Session expired. Run `makroify login` again.");
+      throw new NotAuthenticatedError(
+        loaded ? "Session expired. Run `makroify login` again." : undefined,
+      );
     }
 
     this.session = loaded;

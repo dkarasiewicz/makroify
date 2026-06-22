@@ -38,8 +38,8 @@ npx eve init .            # registers the agent/ folder with Eve
 Set one model credential and your Makro login in `.env` (see `../.env.example`):
 
 ```
-EVE_MODEL=anthropic/claude-opus-4.8
-ANTHROPIC_API_KEY=...      # or AI_GATEWAY_API_KEY
+EVE_MODEL=anthropic/claude-haiku-4.5
+AI_GATEWAY_API_KEY=...      # or ANTHROPIC_API_KEY
 MAKRO_USER_ID=you@example.com
 MAKRO_PASSWORD=...
 ```
@@ -86,7 +86,7 @@ This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` **or** `AI_GATEWAY_API_KEY` | model credential |
-| `EVE_MODEL` | optional, defaults to `anthropic/claude-opus-4.8` |
+| `EVE_MODEL` | optional, defaults to `anthropic/claude-haiku-4.5` |
 | `MAKRO_USER_ID`, `MAKRO_PASSWORD` | the Makro account the bot manages |
 | `MAKRO_CHROMIUM_PATH` | optional Chromium override; **auto-wired** on Vercel |
 | `DISCORD_BOT_TOKEN` (+ app id / public key) | Discord channel |

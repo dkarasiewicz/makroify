@@ -14,3 +14,6 @@ dist/
 
 # Never commit the captured HAR — it contains live credentials & tokens
 *.har
+
+# Eve runtime session/durability state (never commit)
+.workflow-data/

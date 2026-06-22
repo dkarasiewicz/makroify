@@ -1,9 +1,9 @@
 import { defineAgent } from "eve";
 
 /**
- * Makro shopping assistant. Model is configurable via EVE_MODEL so the same
- * codebase can run a cheaper model in dev and a stronger one in production.
+ * Makro shopping assistant. A small, cheap model is plenty for "find product →
+ * tweak cart" chat. Override with EVE_MODEL (e.g. a stronger model in prod).
  */
 export default defineAgent({
-  model: process.env.EVE_MODEL ?? "anthropic/claude-opus-4.8",
+  model: process.env.EVE_MODEL ?? "anthropic/claude-haiku-4.5",
 });

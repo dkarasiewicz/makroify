@@ -64,25 +64,80 @@ id / public key). Invite the bot to your server, then DM it or mention it.
 
 ## Deploy to Vercel
 
-The agent is a normal Vercel app. Push to a repo connected to Vercel (or
-`vercel deploy`), set the env vars in the Vercel dashboard, and point Discord's
-interactions URL at the deployed app. Verify with:
+This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
+(Eve builds via Nitro, which auto-targets Vercel's Build Output API), and
+`engines.node` pins Node 24 (Eve's requirement). No extra config needed.
 
-```bash
-npx eve dev https://your-app.vercel.app
-```
+**Steps**
+
+1. Import the GitHub repo in Vercel (or run `vercel` / `vercel deploy` from the
+   project root). Vercel reads `vercel.json` — no framework preset needed.
+2. Set the environment variables below in the Vercel dashboard (Project →
+   Settings → Environment Variables).
+3. Deploy. Verify the running app with:
+   ```bash
+   npx eve dev https://your-app.vercel.app
+   ```
+4. Add Discord (`npx eve channels add discord`) and point Discord's interactions
+   URL at the deployed app.
+
+**Required env vars (Vercel)**
+
+| Variable | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` **or** `AI_GATEWAY_API_KEY` | model credential |
+| `EVE_MODEL` | optional, defaults to `anthropic/claude-opus-4.8` |
+| `MAKRO_USER_ID`, `MAKRO_PASSWORD` | the Makro account the bot manages |
+| `MAKRO_CHROMIUM_PATH` | optional Chromium override; **auto-wired** on Vercel |
+| `DISCORD_BOT_TOKEN` (+ app id / public key) | Discord channel |
+
+`@sparticuz/chromium` and `playwright-core` are already optional dependencies, so
+they install on Vercel automatically. On Vercel the resolver detects the `VERCEL`
+env and calls `@sparticuz/chromium` for the browser — **option A needs no code or
+extra packages**, just the Makro + model env vars above.
 
 ### ⚠️ Login on serverless
 
-Makro's login requires a real browser (Playwright) to pass Akamai — see the root
-README. **Standard Vercel serverless functions can't launch a full browser**, so
-plan for one of these:
+Makro's login needs a real browser (Playwright) to pass Akamai — see the root
+README. The **data/cart calls run fine on Vercel serverless**; only the login
+needs a browser. Options:
 
-1. **Pre-seed sessions** — run `makroify login` somewhere with a browser (your
-   machine, or the SaaS "login worker") and share the session via a common
-   `SessionStore` (a Supabase-backed store in the SaaS design). The Vercel agent
-   then only does data/cart calls, which work fine on serverless.
-2. **Remote browser** — point the browser login at a hosted Chromium
-   (Browserless / `@sparticuz/chromium` on a fat function) for in-runtime login.
+**A. `@sparticuz/chromium` inside the Vercel function** (in-runtime login)
+
+```bash
+npm i playwright-core @sparticuz/chromium
+```
+
+Resolve the binary at startup and pass its path via `MAKRO_CHROMIUM_PATH`, or use
+a custom resolver:
+
+```ts
+import chromium from "@sparticuz/chromium";
+import { MakroClient } from "../src/core/index";
+
+const makro = new MakroClient({
+  credentials: { userId, password },
+  store,                       // your SessionStore
+  loginMethod: "browser",
+  browser: {
+    headless: true,
+    executablePath: await chromium.executablePath(),
+    extraArgs: chromium.args,  // Lambda-tuned flags
+  },
+});
+```
+
+The provider auto-falls back to `playwright-core` when `executablePath` is set, so
+you don't bundle a browser. Configure the function with **high memory (≥1024 MB)**
+and a longer `maxDuration` (the browser launch + login takes ~10–20 s).
+
+> ⚠️ **Unverified risk:** login was validated from a residential IP. Akamai may be
+> stricter from Vercel's datacenter IPs even with real Chromium — test before
+> relying on it. If it gets blocked, use option B.
+
+**B. Pre-seed sessions (recommended for SaaS)** — run the browser login on a
+small always-on worker (or the user's machine) and share the session through a
+common `SessionStore` (Supabase-backed in the SaaS design). The Vercel agent then
+only makes data/cart calls. This sidesteps the datacenter-IP risk entirely.
 
 For local `eve dev`, the bundled Playwright Chromium logs in automatically.

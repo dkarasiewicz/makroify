@@ -96,11 +96,10 @@ class RedisSessionStore implements SessionStore {
 const makro = new MakroClient({ store: new RedisSessionStore(), credentials: { userId, password } });
 ```
 
-## Agent tools (Eve / Vercel AI SDK)
+## Chat agent (Eve → Discord/Slack/web)
 
-`src/eve/tools.ts` exposes the operations as framework-agnostic tool descriptors
-(`createMakroTools(client)`) with JSON Schemas, ready to adapt to Eve or the
-Vercel AI SDK. See the file header for the adapter snippet.
+`agent/` is an [Eve](https://eve.dev) agent that exposes these operations as chat
+tools, ready to deploy to Vercel and connect to Discord. See `agent/README.md`.
 
 ## Architecture
 
@@ -117,7 +116,7 @@ src/core/
   order.ts         placeOrder (stub)
   jwt.ts           ordercapture JWT context parsing
 src/cli/index.ts   commander CLI
-src/eve/tools.ts   agent tool descriptors
+agent/             Eve chat agent (tools wrap MakroClient)
 skills/makroify/   Claude Code skill
 ```
 

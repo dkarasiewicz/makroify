@@ -12,6 +12,14 @@ export interface BrowserLoginOptions {
   userAgent?: string;
   /** Optional Playwright launch channel, e.g. "chrome" to use system Chrome. */
   channel?: string;
+  /**
+   * Path to a Chromium executable. Set this on serverless (Vercel/Lambda) using
+   * `@sparticuz/chromium` — e.g. `await chromium.executablePath()`. When set, the
+   * provider uses `playwright-core` rather than the bundled Playwright browser.
+   */
+  executablePath?: string;
+  /** Extra launch args, e.g. `chromium.args` from `@sparticuz/chromium`. */
+  extraArgs?: string[];
 }
 
 const DEFAULT_UA =
@@ -35,7 +43,8 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
     const browser = await chromium.launch({
       headless: opts.headless ?? true,
       channel: opts.channel,
-      args: ["--disable-blink-features=AutomationControlled"],
+      executablePath: opts.executablePath,
+      args: ["--disable-blink-features=AutomationControlled", ...(opts.extraArgs ?? [])],
     });
     try {
       const ctx = await browser.newContext({
@@ -111,11 +120,20 @@ async function detectLoginError(page: import("playwright").Page): Promise<string
 }
 
 async function loadPlaywright(): Promise<typeof import("playwright")> {
+  // Prefer full `playwright` (bundled browser) for local/dev; fall back to
+  // `playwright-core` for serverless, where the browser comes from
+  // `@sparticuz/chromium` via `executablePath`.
   try {
     return await import("playwright");
   } catch {
+    /* try playwright-core next */
+  }
+  try {
+    return (await import("playwright-core" as string)) as typeof import("playwright");
+  } catch {
     throw new AuthError(
-      "Playwright is required for browser login but is not installed. Run `npm i playwright && npx playwright install chromium`.",
+      "Browser login needs Playwright. Local: `npm i playwright && npx playwright install chromium`. " +
+        "Serverless: `npm i playwright-core @sparticuz/chromium` and pass browser.executablePath.",
     );
   }
 }

@@ -4,6 +4,11 @@ dist/
 .env
 .env.local
 
+# Build artifacts (Eve / Nitro / Vercel)
+.output/
+.vercel/
+.eve/
+
 # Local session/credential cache written by the CLI (FileSessionStore default dir)
 .makroify/
 

@@ -54,7 +54,10 @@ export class EnvTenantResolver implements TenantResolver {
       credentials,
       store,
       loginMethod: process.env.MAKRO_LOGIN_METHOD === "direct" ? "direct" : "browser",
-      browser: { headless: process.env.MAKRO_HEADLESS !== "0" },
+      browser: {
+        headless: process.env.MAKRO_HEADLESS !== "0",
+        ...(await serverlessBrowser()),
+      },
       overrides: {
         storeId: process.env.MAKRO_STORE_ID,
         fsdAddressId: process.env.MAKRO_FSD_ADDRESS_ID,
@@ -62,6 +65,24 @@ export class EnvTenantResolver implements TenantResolver {
       debug: process.env.MAKROIFY_DEBUG === "1",
     });
     return this.client;
+  }
+}
+
+/**
+ * On serverless (Vercel/Lambda) resolve a Chromium binary for the login browser.
+ * Uses an explicit `MAKRO_CHROMIUM_PATH`, else auto-wires `@sparticuz/chromium`
+ * when running on Vercel. Returns `{}` locally so the bundled Playwright is used.
+ */
+async function serverlessBrowser(): Promise<{ executablePath?: string; extraArgs?: string[] }> {
+  if (process.env.MAKRO_CHROMIUM_PATH) {
+    return { executablePath: process.env.MAKRO_CHROMIUM_PATH };
+  }
+  if (!process.env.VERCEL && !process.env.AWS_LAMBDA_FUNCTION_NAME) return {};
+  try {
+    const chromium = (await import("@sparticuz/chromium" as string)).default;
+    return { executablePath: await chromium.executablePath(), extraArgs: chromium.args };
+  } catch {
+    return {}; // not installed — fall back to whatever Playwright finds
   }
 }
 

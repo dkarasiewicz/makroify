@@ -7,12 +7,52 @@
  * own Makro account, credentials, and session — resolved here without touching
  * any tool code.
  */
+import { mkdir, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   MakroClient,
   FileSessionStore,
   type SessionStore,
   type Credentials,
+  type LoginLock,
 } from "../../src/core/index";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * A {@link LoginLock} backed by an atomic `mkdir` on the shared session dir.
+ *
+ * Eve runs each tool call in its own context, so an in-memory login mutex is
+ * useless — N parallel searches would each launch a browser login, and Akamai
+ * blocks concurrent logins. This lock lets exactly one context log in while the
+ * others wait; the client re-checks the store after acquiring and reuses the
+ * session the winner wrote (so no duplicate login).
+ */
+function fileLoginLock(dir: string): LoginLock {
+  const lockPath = join(dir, "login.lock");
+  return async () => {
+    await mkdir(dir, { recursive: true }).catch(() => {});
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      try {
+        await mkdir(lockPath); // atomic — throws if another context holds it
+        return async () => {
+          await rm(lockPath, { recursive: true, force: true }).catch(() => {});
+        };
+      } catch {
+        // Steal a stale lock left by a crashed login.
+        try {
+          const s = await stat(lockPath);
+          if (Date.now() - s.mtimeMs > 150_000) await rm(lockPath, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+        await sleep(1000);
+      }
+    }
+    return async () => {}; // timed out — proceed without the lock (best effort)
+  };
+}
 
 /** Identity of the inbound request (filled from the channel/session context). */
 export interface TenantRequest {
@@ -46,13 +86,15 @@ export class EnvTenantResolver implements TenantResolver {
     const credentials: Credentials = { userId, password };
 
     // On Vercel the only writable path is /tmp; warm instances reuse the session.
-    const store: SessionStore = new FileSessionStore({
-      dir: process.env.MAKROIFY_HOME ?? "/tmp/.makroify",
-    });
+    const storeDir = process.env.MAKROIFY_HOME ?? "/tmp/.makroify";
+    const store: SessionStore = new FileSessionStore({ dir: storeDir });
 
     this.client = new MakroClient({
       credentials,
       store,
+      // Serializes logins across Eve's isolated tool contexts so parallel tool
+      // calls don't each launch a browser login (Akamai blocks concurrent ones).
+      loginLock: fileLoginLock(storeDir),
       loginMethod: process.env.MAKRO_LOGIN_METHOD === "direct" ? "direct" : "browser",
       browser: {
         headless: process.env.MAKRO_HEADLESS !== "0",

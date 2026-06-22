@@ -1,5 +1,5 @@
 export { MakroClient } from "./client";
-export type { MakroClientOptions, ContextOverrides } from "./client";
+export type { MakroClientOptions, ContextOverrides, LoginLock } from "./client";
 
 export type {
   Credentials,

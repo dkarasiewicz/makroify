@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+
+# Local session/credential cache written by the CLI (FileSessionStore default dir)
+.makroify/
+
+# Never commit the captured HAR — it contains live credentials & tokens
+*.har

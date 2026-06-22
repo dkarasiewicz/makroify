@@ -53,14 +53,17 @@ npm run dev          # or: npx eve dev
 Try: *"search for oat milk"*, *"what's in my cart?"*, *"add 2 of the cheapest
 strawberries"*.
 
-## Add Discord
+## Discord
 
-```bash
-npx eve channels add discord
-```
+Discord is served by the **gateway bot** in [`../bot`](../bot), not an Eve
+channel — so the team can chat *normally* in a channel (no slash command) and the
+bot reads messages, replies, and reacts ✅ when it changes the cart. It needs no
+public URL/tunnel (outbound WebSocket). See `../bot/README.md`. Run it alongside
+the agent with `npm run bot`.
 
-Follow the prompts to register the bot and set `DISCORD_BOT_TOKEN` (and the app
-id / public key). Invite the bot to your server, then DM it or mention it.
+> The old interactions/slash-command channel was removed in favour of the gateway
+> bot. To re-add a slash-command channel for serverless, run
+> `npx eve channels add` and re-create `agent/channels/discord.ts`.
 
 ## Deploy to Vercel
 
@@ -78,10 +81,12 @@ This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
    ```bash
    npx eve dev https://your-app.vercel.app
    ```
-4. Add Discord (`npx eve channels add discord`) and point Discord's interactions
-   URL at the deployed app.
 
-**Required env vars (Vercel)**
+> Note: the Discord **gateway bot** needs a persistent WebSocket, so it can't run
+> on Vercel serverless — run it on a small always-on host (it just needs
+> `DISCORD_BOT_TOKEN` and `EVE_BASE_URL` pointing at the deployed agent).
+
+**Required env vars (Vercel — the agent)**
 
 | Variable | Purpose |
 |---|---|
@@ -89,7 +94,6 @@ This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
 | `EVE_MODEL` | optional, defaults to `anthropic/claude-haiku-4.5` |
 | `MAKRO_USER_ID`, `MAKRO_PASSWORD` | the Makro account the bot manages |
 | `MAKRO_CHROMIUM_PATH` | optional Chromium override; **auto-wired** on Vercel |
-| `DISCORD_BOT_TOKEN` (+ app id / public key) | Discord channel |
 
 `@sparticuz/chromium` and `playwright-core` are already optional dependencies, so
 they install on Vercel automatically. On Vercel the resolver detects the `VERCEL`

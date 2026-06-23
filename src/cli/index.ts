@@ -1,7 +1,5 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
 import { MakroClient } from "../core/index";
 import type { Cart, Product } from "../core/index";
 
@@ -38,40 +36,13 @@ const zl = (s: string | undefined, n: number) => (s ?? "").padEnd(n).slice(0, n)
 const money = (n: number | null | undefined, cur = "PLN") =>
   n == null ? "—".padStart(9) : `${n.toFixed(2)} ${cur}`.padStart(9);
 
-async function prompt(q: string, opts: { mute?: boolean } = {}): Promise<string> {
-  const rl = createInterface({ input: stdin, output: stdout, terminal: true });
-  if (opts.mute) {
-    // Hide typed characters for password entry.
-    const w = stdout.write.bind(stdout);
-    (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = (s: string) => {
-      if (s.includes(q)) w(s);
-    };
-  }
-  const answer = await rl.question(q);
-  rl.close();
-  if (opts.mute) stdout.write("\n");
-  return answer.trim();
-}
-
 // --- commands --------------------------------------------------------------
 
 program
   .command("login")
-  .description("Log in (via a real browser, to pass Akamai) and persist the session")
-  .option("-u, --user <email>", "user id / email")
-  .option("-p, --password <password>", "password")
-  .option("--headed", "show the browser window (debug / solve a captcha)")
-  .option("--direct", "skip the browser and POST credentials directly (usually Akamai-blocked)")
-  .action(async (o) => {
-    const opts = program.opts();
-    const c = MakroClient.fromEnv({
-      debug: Boolean(opts.debug),
-      loginMethod: o.direct ? "direct" : "browser",
-      browser: { headless: !o.headed },
-    });
-    const userId = o.user ?? process.env.MAKRO_USER_ID ?? (await prompt("User id: "));
-    const password = o.password ?? process.env.MAKRO_PASSWORD ?? (await prompt("Password: ", { mute: true }));
-    const ctx = await c.login({ userId, password });
+  .description("Mint a session from MAKRO_COOKIE (silent SSO) and persist it")
+  .action(async () => {
+    const ctx = await client().login();
     out(
       () =>
         console.log(

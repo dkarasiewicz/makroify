@@ -1,17 +1,13 @@
 export { MakroClient } from "./client";
-export type { MakroClientOptions, ContextOverrides, LoginLock } from "./client";
+export type { MakroClientOptions, ContextOverrides } from "./client";
 
 export type {
-  Credentials,
   LoginResult,
   SessionProvider,
   ProvidedSession,
-  CodeRequest,
   HarvestedCookie,
 } from "./auth";
-export { directSessionProvider, pkcePair, buildSigninUrl, seedJar } from "./auth";
-export { browserSessionProvider } from "./browser-login";
-export type { BrowserLoginOptions } from "./browser-login";
+export { cookieSsoProvider, parseCookieHeader, pkcePair, seedJar } from "./auth";
 export type {
   Session,
   SessionStore,

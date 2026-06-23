@@ -9,10 +9,6 @@ export function variantIdFromBundleId(bundleId: string): string {
   return bundleId.slice(0, -4);
 }
 
-// ---------------------------------------------------------------------------
-// Search
-// ---------------------------------------------------------------------------
-
 interface RawSearchResponse {
   amount: number;
   page: number;
@@ -68,10 +64,6 @@ export async function search(
 
   return { query, total: data.amount ?? hits.length, page: data.page ?? page, totalPages: data.totalPages ?? 1, hits };
 }
-
-// ---------------------------------------------------------------------------
-// Resolution (variant -> orderable bundle + name + price)
-// ---------------------------------------------------------------------------
 
 /**
  * Resolve variant ids to full {@link Product} records via `betty-variants`.
@@ -129,13 +121,10 @@ export async function resolveBundles(
 ): Promise<Map<string, Product>> {
   const variantIds = [...new Set(bundleIds.map(variantIdFromBundleId))];
   const byVariant = await resolveVariants(http, ctx, variantIds, deliveryDate);
-  // Re-key by bundleId, matching exact bundle when the variant has several.
   const byBundle = new Map<string, Product>();
-  // resolveVariants only kept the default bundle per variant; pull every bundle.
-  // To be precise for arbitrary bundleIds, index all bundles produced.
   for (const p of byVariant.values()) byBundle.set(p.bundleId, p);
-  // Fallback: for requested bundleIds whose default differs, still map to the
-  // variant's resolved product so callers get a name/price.
+  // A requested bundle whose default differs still maps to its variant's
+  // product, so callers always get a name/price.
   for (const bundleId of bundleIds) {
     if (!byBundle.has(bundleId)) {
       const p = byVariant.get(variantIdFromBundleId(bundleId));
@@ -145,8 +134,7 @@ export async function resolveBundles(
   return byBundle;
 }
 
-// --- raw betty-variants shapes (only the fields we read) -------------------
-
+// Raw betty-variants shapes — only the fields we read.
 interface RawSellingPriceInfo {
   finalPrice?: number;
   grossPrice?: number;

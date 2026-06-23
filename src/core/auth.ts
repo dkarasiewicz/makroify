@@ -2,27 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { Http } from "./http";
 import { MakroCookieJar } from "./cookies";
 import { AuthError } from "./errors";
-import {
-  CLIENT_ID,
-  DEFAULTS,
-  ENDPOINTS,
-  IDAM_BASE,
-  REALM_ID,
-  REDIRECT_URI,
-  SCOPE,
-} from "./config";
-
-export interface Credentials {
-  userId: string;
-  password: string;
-}
+import { CLIENT_ID, DEFAULTS, ENDPOINTS, REALM_ID, SCOPE, SHOP_BASE, SILENT_REDIRECT_URI } from "./config";
 
 export interface LoginResult {
-  /** The ordercapture JWT used as customer context. */
   jwt: string;
 }
 
-/** A cookie harvested from a browser/jar, to seed the lightweight client. */
 export interface HarvestedCookie {
   name: string;
   value: string;
@@ -30,189 +15,147 @@ export interface HarvestedCookie {
   path?: string;
 }
 
-/** A complete, ready-to-use session produced by a {@link SessionProvider}. */
 export interface ProvidedSession {
-  /** The ordercapture JWT. */
   jwt: string;
-  /** Session cookies (the actual credential for the data API). */
   cookies: HarvestedCookie[];
 }
 
-/**
- * Strategy for performing the Akamai-gated login and returning a usable session.
- * {@link directSessionProvider} replays the HTTP chain (works only where Akamai
- * is absent); {@link browser-login.browserSessionProvider} drives a real browser.
- */
-export type SessionProvider = (creds: Credentials) => Promise<ProvidedSession>;
-
-/** Parameters needed to render the Signin page / submit credentials. */
-export interface CodeRequest {
-  userId: string;
-  password: string;
-  codeChallenge: string;
-  state: string;
-  redirectUri: string;
-}
+export type SessionProvider = () => Promise<ProvidedSession>;
 
 function base64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** PKCE pair: a random verifier and its S256 challenge. */
 export function pkcePair(): { verifier: string; challenge: string } {
-  const verifier = randomBytes(32).toString("hex"); // 64 chars, within 43..128
+  const verifier = randomBytes(32).toString("hex");
   const challenge = base64url(createHash("sha256").update(verifier).digest());
   return { verifier, challenge };
 }
 
-/** Build the IDAM Signin URL the SPA uses (PKCE challenge lives in the query). */
-export function buildSigninUrl(req: CodeRequest): string {
-  const p = new URLSearchParams({
-    passwordless: "true",
-    state: req.state,
-    scope: SCOPE,
-    locale_id: DEFAULTS.locale,
-    redirect_uri: req.redirectUri,
-    client_id: CLIENT_ID,
-    country_code: DEFAULTS.country,
-    realm_id: REALM_ID,
-    user_type: DEFAULTS.userType,
-    code_challenge: req.codeChallenge,
-    code_challenge_method: "S256",
-    response_type: "code",
-  });
-  return `${IDAM_BASE}/web/Signin?${p}`;
-}
-
-/**
- * Run login via the given session provider and seed the client's cookie jar
- * with the resulting session cookies (the actual credential for data calls).
- */
-export async function login(http: Http, creds: Credentials, provider: SessionProvider): Promise<LoginResult> {
-  const session = await provider(creds);
+/** Run the provider and seed the client's jar with the session cookies. */
+export async function login(http: Http, provider: SessionProvider): Promise<LoginResult> {
+  const session = await provider();
   seedJar(http.jar, session.cookies);
   return { jwt: session.jwt };
 }
 
-/** Seed a cookie jar with cookies harvested from a browser/another jar. */
 export function seedJar(jar: MakroCookieJar, cookies: HarvestedCookie[]): void {
   for (const c of cookies) {
     const path = c.path ?? "/";
     const host = c.domain.replace(/^\./, "");
-    const url = `https://${host}${path}`;
     const domainAttr = c.domain ? `; Domain=${c.domain}` : "";
-    jar.storeFromResponse(url, [`${c.name}=${c.value}${domainAttr}; Path=${path}`]);
+    jar.storeFromResponse(`https://${host}${path}`, [`${c.name}=${c.value}${domainAttr}; Path=${path}`]);
   }
 }
 
 /**
- * Direct (no-browser) login: replays the full HTTP chain. Subject to Akamai Bot
- * Manager — fails with 403 where it is enforced. Useful for tests / non-gated
- * environments.
+ * The login path. Reuses a logged-in browser's IDAM cookies to run the SPA's
+ * silent OAuth flow (`prompt=none`) — minting a fresh code → access token →
+ * ordercapture JWT with no password and no Akamai-gated step. The IDAM session
+ * outlives the 1h JWT by weeks, so the same pasted cookies keep refreshing it.
  */
-export function directSessionProvider(): SessionProvider {
-  return async (creds) => {
+export function cookieSsoProvider(cookies: HarvestedCookie[]): SessionProvider {
+  return async () => {
+    if (!cookies.length) {
+      throw new AuthError("No cookies provided — set MAKRO_COOKIE to a logged-in idam.makro.pl Cookie header.");
+    }
     const jar = new MakroCookieJar();
+    seedJar(jar, cookies);
     const http = new Http({ jar });
+
     const { verifier, challenge } = pkcePair();
-    const state = randomBytes(16).toString("hex");
-    const { code } = await directAuthenticate(http, {
-      userId: creds.userId,
-      password: creds.password,
-      codeChallenge: challenge,
-      state,
-      redirectUri: REDIRECT_URI,
-    });
-    const accessToken = await exchangeCodeForAccessToken(http, code, verifier);
-    const jwt = await loginWithIdamAccessToken(http, accessToken);
+    const code = await silentAuthorize(http, challenge, randomBytes(16).toString("hex"));
+    const { accessToken, idToken } = await exchangeCodeForAccessToken(http, code, verifier);
+    const { jwt, compressedJwt } = await loginWithIdamAccessToken(http, accessToken);
+
+    // The SPA sets these client-side after login; the data API authorizes off
+    // `compressedJWT` (+ `idamUserIdToken`), so we set them ourselves.
+    seedJar(jar, [
+      ...(idToken ? [cookie("idamUserIdToken", idToken)] : []),
+      ...(compressedJwt ? [cookie("compressedJWT", compressedJwt)] : []),
+      cookie("JWT", jwt),
+    ]);
+
     return { jwt, cookies: jar.export() };
   };
 }
 
-async function directAuthenticate(http: Http, req: CodeRequest): Promise<{ code: string }> {
-  const form = new URLSearchParams({
-    user_id: req.userId,
-    password: req.password,
-    user_type: DEFAULTS.userType,
+const cookie = (name: string, value: string): HarvestedCookie => ({ name, value, domain: ".makro.pl", path: "/" });
+
+/**
+ * `prompt=none` authorize: with a valid IDAM session cookie this returns an auth
+ * code (no prompt) inside a tiny HTML page redirecting to `silent-redirect.html`.
+ */
+async function silentAuthorize(http: Http, codeChallenge: string, state: string): Promise<string> {
+  const p = new URLSearchParams({
     client_id: CLIENT_ID,
+    redirect_uri: SILENT_REDIRECT_URI,
     response_type: "code",
+    scope: SCOPE,
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256",
+    prompt: "none",
+    realm_id: REALM_ID,
     country_code: DEFAULTS.country,
     locale_id: DEFAULTS.locale,
-    realm_id: REALM_ID,
-    account_id: "",
-    redirect_url: req.redirectUri,
-    state: req.state,
-    nonce: "",
-    scope: SCOPE,
-    code_challenge: req.codeChallenge,
-    code_challenge_method: "S256",
+    user_type: DEFAULTS.userType,
   });
-
-  const res = await http.request(ENDPOINTS.authenticate(), {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-      origin: IDAM_BASE,
-      referer: `${IDAM_BASE}/web/Signin`,
-    },
-    raw: form.toString(),
+  const res = await http.request(`${ENDPOINTS.authorize()}?${p}`, {
+    method: "GET",
+    headers: { accept: "text/html", referer: `${SHOP_BASE}/` },
     noThrow: true,
   });
+  const body = await res.text().catch(() => "");
+  const expired = "The pasted cookies are expired — copy a fresh Cookie header from a logged-in browser.";
+  if (res.status >= 400) throw new AuthError(`Silent authorize failed (HTTP ${res.status}). ${expired}`);
 
-  const location = res.headers.get("location") ?? "";
-  const text = await res.text().catch(() => "");
-  if (res.status >= 400) {
-    throw new AuthError(`Authentication failed (HTTP ${res.status}). Body: ${text.slice(0, 300)}`);
-  }
-  const code = extractAuthCode(`${location}\n${text}`);
-  if (!code) throw new AuthError(`Could not locate authorization code. Body: ${text.slice(0, 300)}`);
-  return { code };
+  const match = /[?&]code=([^&"#\s]+)/.exec(body.replace(/&amp;/g, "&"));
+  if (!match) throw new AuthError(`Silent authorize returned no code. ${expired}`);
+  return decodeURIComponent(match[1]!);
 }
 
-/** Pull an OAuth `code` out of a redirect URL or JSON blob. */
-export function extractAuthCode(haystack: string): string | null {
-  try {
-    const obj = JSON.parse(haystack.trim().split("\n").pop() ?? "");
-    for (const key of ["redirectUrl", "redirect_uri", "redirectUri", "location", "url", "code", "authorizationCode"]) {
-      const v = (obj as Record<string, unknown>)[key];
-      if (typeof v === "string") {
-        const m = /[?&#]code=([^&"#\s]+)/.exec(v);
-        if (m) return decodeURIComponent(m[1]!);
-        if (key === "code" || key === "authorizationCode") return v;
-      }
-    }
-  } catch {
-    // not JSON; fall through
+export function parseCookieHeader(raw: string, domain = ".makro.pl"): HarvestedCookie[] {
+  const out: HarvestedCookie[] = [];
+  for (const part of raw.split(/;\s*/)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    out.push({ name: part.slice(0, eq).trim(), value: part.slice(eq + 1).trim(), domain, path: "/" });
   }
-  const m = /[?&#]code=([^&"#\s]+)/.exec(haystack);
-  return m ? decodeURIComponent(m[1]!) : null;
+  return out;
 }
 
-/** Exchange the authorization code for an IDAM access token (PKCE). */
-export async function exchangeCodeForAccessToken(http: Http, code: string, verifier: string): Promise<string> {
+/** Exchange the auth code for an IDAM access token (PKCE). */
+export async function exchangeCodeForAccessToken(
+  http: Http,
+  code: string,
+  verifier: string,
+): Promise<{ accessToken: string; idToken?: string }> {
   const form = new URLSearchParams({
     grant_type: "authorization_code",
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: SILENT_REDIRECT_URI,
     code,
     code_verifier: verifier,
     client_id: CLIENT_ID,
   });
-  const data = await http.json<{ access_token?: string }>(ENDPOINTS.accessToken(), {
+  const data = await http.json<{ access_token?: string; id_token?: string }>(ENDPOINTS.accessToken(), {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     raw: form.toString(),
   });
   if (!data.access_token) throw new AuthError("Token exchange returned no access_token");
-  return data.access_token;
+  return { accessToken: data.access_token, idToken: data.id_token };
 }
 
-/** Trade the IDAM access token for the ordercapture JWT + session cookies. */
-export async function loginWithIdamAccessToken(http: Http, accessToken: string): Promise<string> {
-  const data = await http.json<{ JWT?: string }>(ENDPOINTS.loginWithIdamAccessToken(DEFAULTS.country), {
-    method: "POST",
-    headers: { "content-type": "text/plain" },
-    raw: accessToken,
-  });
+/** Trade the IDAM access token for the ordercapture JWT (+ its compressed form). */
+export async function loginWithIdamAccessToken(
+  http: Http,
+  accessToken: string,
+): Promise<{ jwt: string; compressedJwt?: string }> {
+  const data = await http.json<{ JWT?: string; compressedJWT?: string }>(
+    ENDPOINTS.loginWithIdamAccessToken(DEFAULTS.country),
+    { method: "POST", headers: { "content-type": "text/plain" }, raw: accessToken },
+  );
   if (!data.JWT) throw new AuthError("loginWithIdamAccessToken returned no JWT");
-  return data.JWT;
+  return { jwt: data.JWT, compressedJwt: data.compressedJWT };
 }

@@ -77,9 +77,7 @@ client.on(Events.MessageCreate, async (msg) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Eve session bridge
-// ---------------------------------------------------------------------------
+// --- Eve session bridge ---
 
 const CART_TOOLS = ["makro_add_to_cart", "makro_update_quantity", "makro_remove_from_cart"];
 
@@ -216,9 +214,7 @@ async function replyInChunks(channel: SendableChannels, text: string): Promise<v
   for (const part of parts) await channel.send(part);
 }
 
-// ---------------------------------------------------------------------------
-// Daily 20:00 (Europe/Warsaw) cart-review reminder
-// ---------------------------------------------------------------------------
+// --- Daily 20:00 (Europe/Warsaw) cart-review reminder ---
 
 function warsawNow(): { hour: number; minute: number; date: string; dow: number } {
   const parts = new Intl.DateTimeFormat("en-GB", {

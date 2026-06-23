@@ -12,33 +12,38 @@ Discord — the core is framework-agnostic and the session storage is pluggable.
 
 ## How auth works (important)
 
-Makro's login page is protected by **Akamai Bot Manager**. Only the single
-credential-submission step (`idam.makro.pl/web/authc/authenticate`) is gated —
-it returns `403` to any non-browser client. Everything else (token exchange,
-search, cart, checkout) works with a plain HTTP client.
+Makro's login is protected by **Akamai Bot Manager** — the credential step
+returns `403` to any non-browser client, so we don't submit a password at all.
 
-So login runs the credential step in a **real headless Chromium** (via
-Playwright), harvests the resulting session cookies + ordercapture JWT, and hands
-them to the lightweight client, which makes all subsequent API calls directly.
-The session lasts ~1 hour; the client re-logs-in automatically when it expires
-(if credentials are available).
+Instead you log in once in a real browser and **paste its cookies**. The
+long-lived IDAM session cookie (`metroIdentity`) lets us run the SPA's *silent*
+OAuth flow (`prompt=none`): mint a fresh authorization code → access token →
+ordercapture JWT, with no password, no browser, and no Akamai-gated step. We set
+the resulting JWT as the `compressedJWT` / `idamUserIdToken` cookies (exactly as
+the web app does) and call the data API directly.
+
+The minted JWT lasts ~1h and is refreshed automatically; the pasted IDAM session
+lasts weeks, so you only re-paste cookies occasionally.
 
 ## Install
 
 ```bash
 npm install
-npx playwright install chromium   # one-time browser download (login only)
 npm run build
 ```
 
+No browser download — auth is pure HTTP.
+
 ## Configure
 
-Copy `.env.example` to `.env` and set your Makro credentials:
+Copy `.env.example` to `.env` and paste your Makro cookies:
 
 ```
-MAKRO_USER_ID=you@example.com
-MAKRO_PASSWORD=your-password
+MAKRO_COOKIE=allowedCookieCategories=necessary; metroIdentity=...; ...
 ```
+
+To get the value: log in at `dlagastronomii.makro.pl`, open DevTools → Network →
+click any request to `idam.makro.pl` → copy the full `Cookie:` request header.
 
 `storeId` and the delivery address are auto-discovered from your account; override
 via `MAKRO_STORE_ID` / `MAKRO_FSD_ADDRESS_ID` if needed.
@@ -46,8 +51,7 @@ via `MAKRO_STORE_ID` / `MAKRO_FSD_ADDRESS_ID` if needed.
 ## CLI
 
 ```bash
-makroify login                 # browser login, persists session to ~/.makroify
-makroify login --headed        # show the window (debug / solve a captcha)
+makroify login                 # mint a session from MAKRO_COOKIE, persist to ~/.makroify
 makroify status                # session + customer context
 makroify search truskawki      # search products -> bundle ids, prices, stock
 makroify search "mleko owsiane" -n 20
@@ -69,8 +73,8 @@ Add `--json` to any command for machine-readable output (handy for agents), and
 ```ts
 import { MakroClient } from "makroify";
 
-const makro = MakroClient.fromEnv();          // reads MAKRO_USER_ID / MAKRO_PASSWORD
-await makro.login();                          // browser login, persists session
+const makro = MakroClient.fromEnv();          // reads MAKRO_COOKIE
+await makro.login();                          // silent SSO, persists session
 
 const hits = await makro.searchProducts("truskawki", { rows: 10 });
 const cart = await makro.getCurrentCart();
@@ -93,7 +97,7 @@ class RedisSessionStore implements SessionStore {
   async clear(): Promise<void> { /* ... */ }
 }
 
-const makro = new MakroClient({ store: new RedisSessionStore(), credentials: { userId, password } });
+const makro = new MakroClient({ store: new RedisSessionStore(), cookieHeader });
 ```
 
 ## Chat agent (Eve → Discord/Slack/web)
@@ -106,8 +110,8 @@ tools, ready to deploy to Vercel and connect to Discord. See `agent/README.md`.
 ```
 src/core/
   client.ts        MakroClient — orchestration, session lifecycle, auto re-login
-  auth.ts          OAuth/PKCE chain + SessionProvider abstraction
-  browser-login.ts Playwright session provider (Akamai-gated login)
+  auth.ts          silent-SSO cookie login (PKCE) + SessionProvider abstraction
+  config.ts        hosts, OAuth client/realm/scope, endpoint builders
   http.ts          cookie-aware fetch wrapper
   cookies.ts       tough-cookie jar
   session.ts       Session types + SessionStore (File / Memory)
@@ -130,5 +134,6 @@ skills/makroify/   Claude Code skill
 
 ## Security
 
-Credentials and the captured HAR contain live secrets — both are gitignored
-(`.env`, `*.har`, `.makroify/`). The session file is written `0600`.
+The pasted cookies and any captured HAR contain live secrets — both are
+gitignored (`.env`, `*.har`, `.makroify/`). The session file is written `0600`.
+```

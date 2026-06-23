@@ -1,7 +1,6 @@
 import { Http, type Logger } from "./http";
 import { MakroCookieJar } from "./cookies";
-import { login as runLogin, directSessionProvider, type SessionProvider, type Credentials } from "./auth";
-import { browserSessionProvider, type BrowserLoginOptions } from "./browser-login";
+import { login as runLogin, cookieSsoProvider, parseCookieHeader, type SessionProvider } from "./auth";
 import { parseJwtContext } from "./jwt";
 import { DEFAULTS } from "./config";
 import {
@@ -10,7 +9,7 @@ import {
   type SessionContext,
   type SessionStore,
 } from "./session";
-import { HttpError, NotAuthenticatedError } from "./errors";
+import { HttpError } from "./errors";
 import type { RequestContext } from "./context";
 import {
   search as runSearch,
@@ -31,24 +30,18 @@ export interface ContextOverrides {
 
 export interface MakroClientOptions {
   store?: SessionStore;
-  credentials?: Credentials;
   overrides?: ContextOverrides;
-  /** How to get past the Akamai-gated credential step. Default "browser". */
-  loginMethod?: "browser" | "direct";
-  /** Options for the browser login (headless, timeout, channel). */
-  browser?: BrowserLoginOptions;
-  /** Provide a fully custom session provider (overrides loginMethod). */
+  /**
+   * Raw browser `Cookie:` header from a logged-in idam.makro.pl session. We
+   * reuse its IDAM cookies to silently mint a fresh JWT on demand (no password,
+   * no Akamai-gated login). This is the credential.
+   */
+  cookieHeader?: string;
+  /** Provide a fully custom session provider (overrides `cookieHeader`). */
   sessionProvider?: SessionProvider;
   /**
-   * Cross-context login lock. Acquire returns a release fn. Use this when
-   * multiple isolated processes/contexts share a {@link SessionStore} (e.g. Eve
-   * tool calls) so they don't all launch a browser login at once — Akamai
-   * rate-limits concurrent logins. See `fileLoginLock` in the agent.
-   */
-  loginLock?: LoginLock;
-  /**
    * How long to reuse a stored session before forcing a fresh login, ms. The
-   * real auth (cookies) outlives the 1h JWT, so we reuse the session for a long
+   * IDAM cookies outlive the 1h JWT, so we reuse a minted session for a long
    * window and re-login lazily only when a request actually fails auth.
    * Default 12h.
    */
@@ -58,52 +51,40 @@ export interface MakroClientOptions {
   logger?: Logger;
 }
 
-/** Acquire a cross-context login lock; resolves to a release function. */
-export type LoginLock = () => Promise<() => Promise<void>>;
-
 /**
  * High-level entry point. Holds a session (cookies + JWT + customer context),
  * persists it via a pluggable {@link SessionStore}, and exposes search/cart ops.
  */
 export class MakroClient {
   private store: SessionStore;
-  private credentials?: Credentials;
   private overrides: ContextOverrides;
   private log: Logger;
   private sessionProvider: SessionProvider;
   private session: Session | null = null;
   private http: Http | null = null;
-  private loginLock?: LoginLock;
   private sessionMaxAgeMs: number;
-  /** Dedupes concurrent logins within one context into one. */
+  /** Dedupes concurrent logins into one (so parallel tool calls mint once). */
   private loginInFlight: Promise<SessionContext> | null = null;
 
   constructor(opts: MakroClientOptions = {}) {
     this.store = opts.store ?? new FileSessionStore();
-    this.credentials = opts.credentials;
     this.overrides = opts.overrides ?? {};
-    this.loginLock = opts.loginLock;
     this.sessionMaxAgeMs = opts.sessionMaxAgeMs ?? 12 * 3_600_000;
     this.log = opts.debug ? opts.logger ?? ((m, meta) => console.error(`[makroify] ${m}`, meta ?? "")) : () => {};
     this.sessionProvider =
-      opts.sessionProvider ??
-      (opts.loginMethod === "direct" ? directSessionProvider() : browserSessionProvider(opts.browser));
+      opts.sessionProvider ?? cookieSsoProvider(parseCookieHeader(opts.cookieHeader ?? ""));
   }
 
   /** Build a client from environment variables (.env style). */
   static fromEnv(extra: Partial<MakroClientOptions> = {}): MakroClient {
-    const userId = process.env.MAKRO_USER_ID;
-    const password = process.env.MAKRO_PASSWORD;
     return new MakroClient({
-      credentials: userId && password ? { userId, password } : undefined,
       overrides: {
         country: process.env.MAKRO_COUNTRY,
         locale: process.env.MAKRO_LOCALE,
         storeId: process.env.MAKRO_STORE_ID,
         fsdAddressId: process.env.MAKRO_FSD_ADDRESS_ID,
       },
-      loginMethod: process.env.MAKRO_LOGIN_METHOD === "direct" ? "direct" : "browser",
-      browser: { headless: process.env.MAKRO_HEADLESS !== "0" },
+      cookieHeader: process.env.MAKRO_COOKIE,
       debug: process.env.MAKROIFY_DEBUG === "1",
       ...extra,
     });
@@ -112,43 +93,34 @@ export class MakroClient {
   // --- session lifecycle ---------------------------------------------------
 
   /**
-   * Log in (using provided/env credentials) and persist the session.
-   *
-   * Concurrent calls share a single login — critical because the browser login
-   * is Akamai-rate-limited, so N parallel tool calls must NOT launch N logins.
+   * Mint a fresh session from the pasted cookies and persist it. Concurrent
+   * calls within a process share one mint (so parallel tool calls don't each run
+   * the silent OAuth chain); the silent SSO is cheap and unthrottled, so no
+   * cross-process lock is needed — a rare double-mint just overwrites the store.
    */
-  async login(creds?: Credentials): Promise<SessionContext> {
+  async login(): Promise<SessionContext> {
     if (this.loginInFlight) return this.loginInFlight;
-    this.loginInFlight = this.lockedLogin(creds).finally(() => {
+    this.loginInFlight = this.freshLogin().finally(() => {
       this.loginInFlight = null;
     });
     return this.loginInFlight;
   }
 
-  /** Acquire the cross-context lock, then re-check the store before logging in. */
-  private async lockedLogin(creds?: Credentials): Promise<SessionContext> {
-    const release = this.loginLock ? await this.loginLock() : null;
-    try {
-      // Another context may have logged in while we waited for the lock.
-      const existing = await this.store.load();
-      if (existing && !this.isStale(existing)) {
-        this.session = existing;
-        this.http = new Http({ jar: new MakroCookieJar(existing.cookies), log: this.log });
-        return existing.context;
-      }
-      return await this.doLogin(creds);
-    } finally {
-      if (release) await release();
+  /** Reuse a session another run just persisted, else mint a new one. */
+  private async freshLogin(): Promise<SessionContext> {
+    const existing = await this.store.load();
+    if (existing && !this.isStale(existing)) {
+      this.session = existing;
+      this.http = new Http({ jar: new MakroCookieJar(existing.cookies), log: this.log });
+      return existing.context;
     }
+    return this.doLogin();
   }
 
-  private async doLogin(creds?: Credentials): Promise<SessionContext> {
-    const credentials = creds ?? this.credentials;
-    if (!credentials) throw new NotAuthenticatedError("No credentials provided (set MAKRO_USER_ID / MAKRO_PASSWORD).");
-
+  private async doLogin(): Promise<SessionContext> {
     const jar = new MakroCookieJar();
     const http = new Http({ jar, log: this.log });
-    const { jwt } = await runLogin(http, credentials, this.sessionProvider);
+    const { jwt } = await runLogin(http, this.sessionProvider);
 
     const context = await this.bootstrapContext(http, jwt);
     const session: Session = { jwt, cookies: jar.serialize(), context, savedAt: Date.now() };
@@ -188,16 +160,10 @@ export class MakroClient {
 
     const loaded = this.session ?? (await this.store.load());
 
-    // No session yet, or it's past the reuse window: log in transparently when
-    // we have credentials (the agent path). Otherwise tell the user to log in.
+    // No session yet, or past the reuse window: mint a fresh one from the cookies.
     if (!loaded || this.isStale(loaded)) {
-      if (this.credentials) {
-        await this.login();
-        return this.session!;
-      }
-      throw new NotAuthenticatedError(
-        loaded ? "Session expired. Run `makroify login` again." : undefined,
-      );
+      await this.login();
+      return this.session!;
     }
 
     this.session = loaded;
@@ -220,7 +186,7 @@ export class MakroClient {
     try {
       return await fn(http, ctx);
     } catch (e) {
-      if (!this.credentials || !isAuthFailure(e)) throw e;
+      if (!isAuthFailure(e)) throw e;
       this.log("auth failure — re-logging in and retrying", e);
       await this.reauth();
       const retry = await this.reqCtx();
@@ -228,7 +194,7 @@ export class MakroClient {
     }
   }
 
-  /** Invalidate the current session and log in fresh (under the login lock). */
+  /** Invalidate the current session and mint a fresh one. */
   private async reauth(): Promise<void> {
     this.session = null;
     this.http = null;

@@ -19,10 +19,6 @@ function cartQuery(ctx: RequestContext): URLSearchParams {
 
 const cartBase = (cartId: string) => `${SHOP_BASE}/ordercapture/customercart/carts/${cartId}`;
 
-// ---------------------------------------------------------------------------
-// Read
-// ---------------------------------------------------------------------------
-
 /** List saved/active carts (lightweight summaries). */
 export async function listCarts(
   http: Http,
@@ -61,9 +57,7 @@ export async function getCart(http: Http, ctx: RequestContext, cartId: string): 
   return parseCart(res.data);
 }
 
-// ---------------------------------------------------------------------------
-// Mutations (all return 202; re-fetch the cart to see the result)
-// ---------------------------------------------------------------------------
+// Mutations are async (HTTP 202) — re-fetch the cart to see the result.
 
 export async function addItem(
   http: Http,
@@ -105,10 +99,6 @@ export async function removeItem(
   const url = `${cartBase(cartId)}/items/${bundleId}?${p}`;
   await http.request(url, { method: "DELETE" });
 }
-
-// ---------------------------------------------------------------------------
-// Parsing
-// ---------------------------------------------------------------------------
 
 interface Money {
   amount: number | null;

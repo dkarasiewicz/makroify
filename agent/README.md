@@ -17,14 +17,14 @@ agent/
 ## Adaptability (env now → SaaS later)
 
 The `.env` decides **what runs** (`EVE_MODEL`, which channels are added) and
-**which Makro account it affects** (`MAKRO_USER_ID` / `MAKRO_PASSWORD`). All
-account resolution goes through `lib/tenant.ts`:
+**which Makro account it affects** (`MAKRO_COOKIE`). All account resolution goes
+through `lib/tenant.ts`:
 
 - **Now — `EnvTenantResolver`:** every chat maps to the single Makro account in
   `.env`. Good for running the bot for your own shop.
 - **Later — `SupabaseTenantResolver`:** each Discord/Slack/WhatsApp user maps to
-  their own account, credentials, and session. Tools don't change — only the
-  resolver. Tracked in the SaaS GitHub issue.
+  their own account cookies and session. Tools don't change — only the resolver.
+  Tracked in the SaaS GitHub issue.
 
 ## Setup
 
@@ -35,13 +35,12 @@ npm install eve@latest ai zod
 npx eve init .            # registers the agent/ folder with Eve
 ```
 
-Set one model credential and your Makro login in `.env` (see `../.env.example`):
+Set one model credential and your Makro cookies in `.env` (see `../.env.example`):
 
 ```
 EVE_MODEL=anthropic/claude-haiku-4.5
 AI_GATEWAY_API_KEY=...      # or ANTHROPIC_API_KEY
-MAKRO_USER_ID=you@example.com
-MAKRO_PASSWORD=...
+MAKRO_COOKIE=allowedCookieCategories=necessary; metroIdentity=...; ...
 ```
 
 ## Run locally
@@ -61,15 +60,13 @@ bot reads messages, replies, and reacts ✅ when it changes the cart. It needs n
 public URL/tunnel (outbound WebSocket). See `../bot/README.md`. Run it alongside
 the agent with `npm run bot`.
 
-> The old interactions/slash-command channel was removed in favour of the gateway
-> bot. To re-add a slash-command channel for serverless, run
-> `npx eve channels add` and re-create `agent/channels/discord.ts`.
-
 ## Deploy to Vercel
 
 This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
 (Eve builds via Nitro, which auto-targets Vercel's Build Output API), and
-`engines.node` pins Node 24 (Eve's requirement). No extra config needed.
+`engines.node` pins Node 24 (Eve's requirement). Auth is pure HTTP (silent SSO
+from the pasted cookies), so it runs on Vercel serverless with no browser — no
+extra packages, no special function config.
 
 **Steps**
 
@@ -92,56 +89,9 @@ This repo is **deploy-ready**: `vercel.json` sets `buildCommand: "eve build"`
 |---|---|
 | `ANTHROPIC_API_KEY` **or** `AI_GATEWAY_API_KEY` | model credential |
 | `EVE_MODEL` | optional, defaults to `anthropic/claude-haiku-4.5` |
-| `MAKRO_USER_ID`, `MAKRO_PASSWORD` | the Makro account the bot manages |
-| `MAKRO_CHROMIUM_PATH` | optional Chromium override; **auto-wired** on Vercel |
+| `MAKRO_COOKIE` | logged-in idam.makro.pl Cookie header (the account the bot manages) |
+| `MAKROIFY_HOME` | optional session dir; use `/tmp/.makroify` on Vercel |
 
-`@sparticuz/chromium` and `playwright-core` are already optional dependencies, so
-they install on Vercel automatically. On Vercel the resolver detects the `VERCEL`
-env and calls `@sparticuz/chromium` for the browser — **option A needs no code or
-extra packages**, just the Makro + model env vars above.
-
-### ⚠️ Login on serverless
-
-Makro's login needs a real browser (Playwright) to pass Akamai — see the root
-README. The **data/cart calls run fine on Vercel serverless**; only the login
-needs a browser. Options:
-
-**A. `@sparticuz/chromium` inside the Vercel function** (in-runtime login)
-
-```bash
-npm i playwright-core @sparticuz/chromium
-```
-
-Resolve the binary at startup and pass its path via `MAKRO_CHROMIUM_PATH`, or use
-a custom resolver:
-
-```ts
-import chromium from "@sparticuz/chromium";
-import { MakroClient } from "../src/core/index";
-
-const makro = new MakroClient({
-  credentials: { userId, password },
-  store,                       // your SessionStore
-  loginMethod: "browser",
-  browser: {
-    headless: true,
-    executablePath: await chromium.executablePath(),
-    extraArgs: chromium.args,  // Lambda-tuned flags
-  },
-});
-```
-
-The provider auto-falls back to `playwright-core` when `executablePath` is set, so
-you don't bundle a browser. Configure the function with **high memory (≥1024 MB)**
-and a longer `maxDuration` (the browser launch + login takes ~10–20 s).
-
-> ⚠️ **Unverified risk:** login was validated from a residential IP. Akamai may be
-> stricter from Vercel's datacenter IPs even with real Chromium — test before
-> relying on it. If it gets blocked, use option B.
-
-**B. Pre-seed sessions (recommended for SaaS)** — run the browser login on a
-small always-on worker (or the user's machine) and share the session through a
-common `SessionStore` (Supabase-backed in the SaaS design). The Vercel agent then
-only makes data/cart calls. This sidesteps the datacenter-IP risk entirely.
-
-For local `eve dev`, the bundled Playwright Chromium logs in automatically.
+> The pasted IDAM session lasts weeks; when it expires the silent SSO starts
+> returning "cookies expired" — refresh `MAKRO_COOKIE` from a logged-in browser.
+> For the multi-tenant SaaS, each user's cookies live in Supabase (see the issue).

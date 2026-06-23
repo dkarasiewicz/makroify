@@ -14,18 +14,20 @@ change items.
 The CLI lives in this project. Build it if `dist/` is missing:
 
 ```bash
-npm install && npx playwright install chromium && npm run build
+npm install && npm run build
 ```
 
-Credentials come from `.env` (`MAKRO_USER_ID`, `MAKRO_PASSWORD`) or the
-environment. Run commands with `node dist/cli/index.js <cmd>` (or `npm run cli -- <cmd>`
-during dev). Prefer `--json` so you can parse the output.
+Auth comes from `MAKRO_COOKIE` in `.env` (or the environment) — the `Cookie`
+header from a logged-in idam.makro.pl browser session. Run commands with
+`node dist/cli/index.js <cmd>` (or `npm run cli -- <cmd>` during dev). Prefer
+`--json` so you can parse the output.
 
 ## Auth model
 
-Login uses a real headless browser (Playwright) to pass Akamai bot protection,
-then caches a session in `~/.makroify` for ~1 hour. After that it re-logs-in
-automatically. If you get a "Not authenticated" error, run `login` first.
+No password, no browser: the pasted IDAM cookies drive a silent OAuth flow
+(`prompt=none`) that mints a fresh JWT on demand. The session is cached in
+`~/.makroify` and refreshed automatically. If you get a "cookies expired" error,
+refresh `MAKRO_COOKIE` from a logged-in browser.
 
 ## Commands
 

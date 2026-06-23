@@ -8,6 +8,4 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   splitting: false,
-  // Playwright is an optional, lazily-imported dependency — never bundle it.
-  external: ["playwright", "playwright-core"],
 });

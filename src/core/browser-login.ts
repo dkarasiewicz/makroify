@@ -34,6 +34,34 @@ const DEFAULT_UA =
   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 /**
+ * Stealth patches injected before any page script runs — masks the most common
+ * headless/automation tells that bot managers (Akamai/DataDome) fingerprint.
+ * Defined as a string so it serializes cleanly into `addInitScript`.
+ */
+const STEALTH_INIT = `try {
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  Object.defineProperty(navigator, 'languages', { get: () => ['pl-PL', 'pl', 'en-US', 'en'] });
+  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+  if (!window.chrome) window.chrome = {};
+  window.chrome.runtime = window.chrome.runtime || {};
+  const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+  if (origQuery) {
+    window.navigator.permissions.query = (p) =>
+      p && p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : origQuery(p);
+  }
+  const getParam = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function (p) {
+    if (p === 37445) return 'Intel Inc.';
+    if (p === 37446) return 'Intel Iris OpenGL Engine';
+    return getParam.call(this, p);
+  };
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+} catch (e) {}`;
+
+/**
  * A {@link SessionProvider} that drives a real Chromium via Playwright to get
  * past Akamai Bot Manager. It loads the Signin page, submits the credentials,
  * lets the SPA complete the OAuth + JWT exchange in-browser, then harvests the
@@ -51,9 +79,22 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
       headless: opts.headless ?? true,
       channel: opts.channel,
       executablePath: opts.executablePath,
-      args: ["--disable-blink-features=AutomationControlled", ...(opts.extraArgs ?? [])],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--no-first-run",
+        "--no-default-browser-check",
+        ...(opts.extraArgs ?? []),
+      ],
     };
-    const contextOpts = { locale: "pl-PL", userAgent: opts.userAgent ?? DEFAULT_UA };
+    // A realistic context blends in: real viewport, PL timezone/locale, Chrome UA.
+    const contextOpts = {
+      locale: "pl-PL",
+      timezoneId: "Europe/Warsaw",
+      viewport: { width: 1280, height: 800 },
+      deviceScaleFactor: 2,
+      userAgent: opts.userAgent ?? DEFAULT_UA,
+    };
 
     // A persistent profile reuses Akamai trust cookies/fingerprint across logins.
     let browser: import("playwright").Browser | null = null;
@@ -65,6 +106,7 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
       ctx = await browser.newContext(contextOpts);
     }
     try {
+      await ctx.addInitScript(STEALTH_INIT);
       const page = ctx.pages()[0] ?? (await ctx.newPage());
       page.setDefaultTimeout(timeout);
 
@@ -193,20 +235,25 @@ async function detectLoginError(page: import("playwright").Page): Promise<string
 }
 
 async function loadPlaywright(): Promise<typeof import("playwright")> {
-  // Prefer full `playwright` (bundled browser) for local/dev; fall back to
-  // `playwright-core` for serverless, where the browser comes from
-  // `@sparticuz/chromium` via `executablePath`.
-  try {
-    return await import("playwright");
-  } catch {
-    /* try playwright-core next */
+  // With MAKRO_REBROWSER=1, prefer rebrowser-playwright-core — it patches the
+  // CDP `Runtime.enable` leak that Akamai/DataDome use to detect automation
+  // (requires `npm i rebrowser-playwright-core && npx rebrowser-playwright-core install chromium`).
+  // Otherwise full `playwright` (bundled browser) for local/dev, then
+  // `playwright-core` for serverless (browser via `@sparticuz/chromium`).
+  const order =
+    process.env.MAKRO_REBROWSER === "1"
+      ? ["rebrowser-playwright-core", "playwright", "playwright-core"]
+      : ["playwright", "playwright-core"];
+  for (const mod of order) {
+    try {
+      return (await import(mod as string)) as typeof import("playwright");
+    } catch {
+      /* try next */
+    }
   }
-  try {
-    return (await import("playwright-core" as string)) as typeof import("playwright");
-  } catch {
-    throw new AuthError(
-      "Browser login needs Playwright. Local: `npm i playwright && npx playwright install chromium`. " +
-        "Serverless: `npm i playwright-core @sparticuz/chromium` and pass browser.executablePath.",
-    );
-  }
+  throw new AuthError(
+    "Browser login needs Playwright. Stealth: `npm i rebrowser-playwright-core`. " +
+      "Local: `npm i playwright && npx playwright install chromium`. " +
+      "Serverless: `npm i playwright-core @sparticuz/chromium` and pass browser.executablePath.",
+  );
 }

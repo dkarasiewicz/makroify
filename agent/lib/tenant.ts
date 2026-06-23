@@ -98,6 +98,8 @@ export class EnvTenantResolver implements TenantResolver {
       loginMethod: process.env.MAKRO_LOGIN_METHOD === "direct" ? "direct" : "browser",
       browser: {
         headless: process.env.MAKRO_HEADLESS !== "0",
+        // Strongest stealth: Camoufox (anti-fingerprint Firefox).
+        camoufox: process.env.MAKRO_CAMOUFOX === "1",
         // Optional real browser (e.g. "chrome" / "msedge") if installed.
         channel: process.env.MAKRO_BROWSER_CHANNEL || undefined,
         // Persistent profile → keeps Akamai trust cookies across logins.

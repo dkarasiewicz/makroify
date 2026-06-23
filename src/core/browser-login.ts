@@ -27,6 +27,12 @@ export interface BrowserLoginOptions {
    * challenges. Recommended for local/long-running use.
    */
   userDataDir?: string;
+  /**
+   * Use Camoufox (anti-fingerprint Firefox) instead of Chromium. Native-level
+   * fingerprint spoofing — the strongest stealth, purpose-built for Akamai etc.
+   * Requires `camoufox-js` installed and `npx camoufox-js fetch`. Local only.
+   */
+  camoufox?: boolean;
 }
 
 const DEFAULT_UA =
@@ -73,20 +79,8 @@ const STEALTH_INIT = `try {
  */
 export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionProvider {
   return async (creds: Credentials): Promise<ProvidedSession> => {
-    const { chromium } = await loadPlaywright();
+    const pw = await loadPlaywright();
     const timeout = opts.timeoutMs ?? 60_000;
-    const launchOpts = {
-      headless: opts.headless ?? true,
-      channel: opts.channel,
-      executablePath: opts.executablePath,
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-features=IsolateOrigins,site-per-process",
-        "--no-first-run",
-        "--no-default-browser-check",
-        ...(opts.extraArgs ?? []),
-      ],
-    };
     // A realistic context blends in: real viewport, PL timezone/locale, Chrome UA.
     const contextOpts = {
       locale: "pl-PL",
@@ -96,17 +90,43 @@ export function browserSessionProvider(opts: BrowserLoginOptions = {}): SessionP
       userAgent: opts.userAgent ?? DEFAULT_UA,
     };
 
-    // A persistent profile reuses Akamai trust cookies/fingerprint across logins.
     let browser: import("playwright").Browser | null = null;
     let ctx: import("playwright").BrowserContext;
-    if (opts.userDataDir) {
-      ctx = await chromium.launchPersistentContext(opts.userDataDir, { ...launchOpts, ...contextOpts });
+    let injectStealth = true;
+
+    if (opts.camoufox) {
+      // Camoufox (anti-fingerprint Firefox) spoofs natively — don't override.
+      const { launchOptions } = await loadCamoufox();
+      browser = await pw.firefox.launch(
+        (await launchOptions({ headless: opts.headless ?? true, os: "macos", locale: "pl-PL" })) as Parameters<
+          typeof pw.firefox.launch
+        >[0],
+      );
+      ctx = await browser.newContext({ locale: "pl-PL", timezoneId: "Europe/Warsaw" });
+      injectStealth = false;
     } else {
-      browser = await chromium.launch(launchOpts);
-      ctx = await browser.newContext(contextOpts);
+      const launchOpts = {
+        headless: opts.headless ?? true,
+        channel: opts.channel,
+        executablePath: opts.executablePath,
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--disable-features=IsolateOrigins,site-per-process",
+          "--no-first-run",
+          "--no-default-browser-check",
+          ...(opts.extraArgs ?? []),
+        ],
+      };
+      // A persistent profile reuses Akamai trust cookies/fingerprint across logins.
+      if (opts.userDataDir) {
+        ctx = await pw.chromium.launchPersistentContext(opts.userDataDir, { ...launchOpts, ...contextOpts });
+      } else {
+        browser = await pw.chromium.launch(launchOpts);
+        ctx = await browser.newContext(contextOpts);
+      }
     }
     try {
-      await ctx.addInitScript(STEALTH_INIT);
+      if (injectStealth) await ctx.addInitScript(STEALTH_INIT);
       const page = ctx.pages()[0] ?? (await ctx.newPage());
       page.setDefaultTimeout(timeout);
 
@@ -256,4 +276,14 @@ async function loadPlaywright(): Promise<typeof import("playwright")> {
       "Local: `npm i playwright && npx playwright install chromium`. " +
       "Serverless: `npm i playwright-core @sparticuz/chromium` and pass browser.executablePath.",
   );
+}
+
+async function loadCamoufox(): Promise<{ launchOptions: (o: Record<string, unknown>) => Promise<unknown> }> {
+  try {
+    return (await import("camoufox-js" as string)) as { launchOptions: (o: Record<string, unknown>) => Promise<unknown> };
+  } catch {
+    throw new AuthError(
+      "Camoufox login needs camoufox-js. Run `npm i camoufox-js && npx camoufox-js fetch`.",
+    );
+  }
 }

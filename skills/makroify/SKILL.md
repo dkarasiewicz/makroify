@@ -34,13 +34,27 @@ refresh `MAKRO_COOKIE` from a logged-in browser.
 ```bash
 node dist/cli/index.js login              # establish/refresh the session
 node dist/cli/index.js status --json      # check who's logged in
-node dist/cli/index.js search "<query>" --json -n 15
+node dist/cli/index.js search "<query>" --json -n 15   # fuzzy full-text search
+node dist/cli/index.js find "<query>" --json      # smart resolve: cart → recent → search
+node dist/cli/index.js recent --json -n 30        # products bought regularly (cached 24h)
+node dist/cli/index.js orders --json -n 10        # past orders (date, total, status)
+node dist/cli/index.js order-details <orderId> --json   # line items of one order
 node dist/cli/index.js cart --json        # current cart + totals
 node dist/cli/index.js add <bundleId> <qty>       # add by bundle id
 node dist/cli/index.js add <variantId> <qty> --variant
 node dist/cli/index.js update <bundleId> <qty>    # set quantity
 node dist/cli/index.js remove <bundleId>
+node dist/cli/index.js order              # PREVIEW the order (dry run, cash on delivery)
+node dist/cli/index.js order --confirm    # actually place the order (irreversible)
 ```
+
+## Resolving a loose request ("truskawki")
+
+Prefer `find` over a raw `search` when the user names a product to add. It checks,
+in order: the **current cart** (maybe just bump the quantity), the
+**recently-bought** list (what they actually buy → add 1, ask if more), then a
+**fuzzy search** (best match, then 2-3 alternatives). `find --json` returns
+`source`, `inCart`, `usuallyBuy`, `best`, and `alternatives`.
 
 ## Key ID rule
 
@@ -59,6 +73,7 @@ node dist/cli/index.js remove <bundleId>
 
 - **Confirm before mutating the cart** (add/update/remove) unless the user was
   explicit about the exact item and quantity.
-- **Placing an order is not implemented** — `order` will error. Do not claim an
-  order was placed.
+- **Placing an order is irreversible and cash-on-delivery.** `order` without
+  `--confirm` only previews (dry run). Only run `order --confirm` after the user
+  explicitly confirms. Never claim an order was placed unless the result says so.
 - Prices are gross PLN; stock shows available-to-promise quantity.

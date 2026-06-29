@@ -6,9 +6,8 @@ inventory: log in, search products, read the cart, and add/update/remove items.
 Designed to be reused later by an [Eve](https://eve.dev) agent connected to
 Discord — the core is framework-agnostic and the session storage is pluggable.
 
-> **Status:** login, search, cart read, and cart management are implemented and
-> tested live. **Placing an order is a stub** (`src/core/order.ts`) — it will be
-> wired up once a checkout HAR is captured.
+> **Status:** login, search, cart read/management, history, and **placing an
+> order** (cash on delivery, confirmation-gated) are implemented.
 
 ## How auth works (important)
 
@@ -53,8 +52,12 @@ via `MAKRO_STORE_ID` / `MAKRO_FSD_ADDRESS_ID` if needed.
 ```bash
 makroify login                 # mint a session from MAKRO_COOKIE, persist to ~/.makroify
 makroify status                # session + customer context
-makroify search truskawki      # search products -> bundle ids, prices, stock
+makroify search truskawki      # fuzzy search -> bundle ids, prices, stock
 makroify search "mleko owsiane" -n 20
+makroify find truskawki        # smart resolve: cart -> recently-bought -> search
+makroify recent                # products bought regularly (cached 24h)
+makroify orders                # past orders (date, total, status)
+makroify order-details <id>    # line items of one past order
 makroify product BTY-X3857140032   # details by variant id
 makroify cart                  # current cart with line totals
 makroify carts                 # list saved/active carts
@@ -62,7 +65,8 @@ makroify add BTY-X38571400320021 2     # add 2 of a bundle id
 makroify add BTY-X3857140032 1 --variant   # add by variant id (auto-resolves)
 makroify update BTY-X38571400320021 5  # set quantity to 5
 makroify remove BTY-X38571400320021    # remove item
-makroify order                 # (not implemented yet)
+makroify order                 # preview the order (dry run; cash on delivery)
+makroify order --confirm       # actually place the order
 ```
 
 Add `--json` to any command for machine-readable output (handy for agents), and
@@ -117,7 +121,9 @@ src/core/
   session.ts       Session types + SessionStore (File / Memory)
   products.ts      search + variant→bundle resolution
   cart.ts          cart read + add/update/remove
-  order.ts         placeOrder (stub)
+  history.ts       recently-bought list + past orders
+  match.ts         fuzzy query variants + name-match ranking
+  order.ts         placeOrder — checkout (cash on delivery) + submit
   jwt.ts           ordercapture JWT context parsing
 src/cli/index.ts   commander CLI
 agent/             Eve chat agent (tools wrap MakroClient)

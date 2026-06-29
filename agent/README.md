@@ -7,8 +7,8 @@ the `MakroClient` from `../src/core`.
 ```
 agent/
   agent.ts          model selection (EVE_MODEL)
-  instructions.md   assistant persona + guardrails
-  tools/            one tool per operation (search, cart, add/update/remove)
+  instructions.md   assistant persona (Polish, sassy) + the smart add flow
+  tools/            search, find, recently-bought, cart, add/update/remove, orders, place-order
   lib/
     tenant.ts       env-now / Supabase-later account resolution
     makro.ts        getMakroClient(ctx) used by every tool
@@ -49,8 +49,8 @@ MAKRO_COOKIE=allowedCookieCategories=necessary; metroIdentity=...; ...
 npm run dev          # or: npx eve dev
 ```
 
-Try: *"search for oat milk"*, *"what's in my cart?"*, *"add 2 of the cheapest
-strawberries"*.
+Try (it answers in Polish, with attitude): *"dodaj truskawki"*, *"co jest w
+koszyku?"*, *"co zwykle zamawiamy?"*, *"pokaż ostatnie zamówienia"*.
 
 ## Discord
 

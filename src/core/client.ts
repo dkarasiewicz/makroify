@@ -9,17 +9,59 @@ import {
   type SessionContext,
   type SessionStore,
 } from "./session";
-import { HttpError } from "./errors";
+import { HttpError, MakroError } from "./errors";
 import type { RequestContext } from "./context";
 import {
   search as runSearch,
   resolveVariants,
+  resolveBundles,
   getProductByVariant,
   type SearchOptions,
 } from "./products";
 import * as cartApi from "./cart";
+import {
+  listRecentlyBought,
+  listOrders,
+  getOrderDetails as runGetOrderDetails,
+  type OrderList,
+  type OrderDetails,
+} from "./history";
+import { fuzzyQueries, rankByMatchThenPrice, strongMatch, uniqueByBundle } from "./match";
 import { placeOrder as runPlaceOrder, type OrderResult, type PlaceOrderParams } from "./order";
-import type { Cart, CartSummary, Product, SearchResults } from "./types";
+import type { Cart, CartItem, CartSummary, Product, SearchResults } from "./types";
+
+const RECENTLY_BOUGHT_TTL_MS = 24 * 3_600_000;
+const RESOLVE_CHUNK = 40;
+
+/** A fuzzy search outcome: the variant that actually returned hits + what was tried. */
+export interface FuzzySearch {
+  /** The query variant that produced results (may differ from the input). */
+  query: string;
+  products: Product[];
+  /** Every query variant attempted, in order. */
+  tried: string[];
+}
+
+/**
+ * Result of resolving a loose user request (e.g. "truskawki") against, in order,
+ * the current cart, the recently-bought list, and a fuzzy search. The caller
+ * decides what to say/do; this just gathers the signals.
+ */
+export interface FindResult {
+  query: string;
+  /** Where the top recommendation came from. */
+  source: "cart" | "recent" | "search" | "none";
+  /** Matching items already in the cart (so the user can just bump quantity). */
+  inCart: CartItem[];
+  /** Matches from the recently-bought list, best first. */
+  recentlyBought: Product[];
+  /** The single best product to add (from recent if any, else search), or null. */
+  best: Product | null;
+  /** A couple of alternatives to offer (cheaper / other close matches). */
+  alternatives: Product[];
+  /** Query variants the search tried (for transparency / debugging). */
+  triedQueries: string[];
+}
 
 export interface ContextOverrides {
   country?: string;
@@ -65,6 +107,8 @@ export class MakroClient {
   private sessionMaxAgeMs: number;
   /** Dedupes concurrent logins into one (so parallel tool calls mint once). */
   private loginInFlight: Promise<SessionContext> | null = null;
+  /** In-memory cache of the resolved recently-bought list (refreshed daily). */
+  private recentlyBought: { at: number; items: Product[] } | null = null;
 
   constructor(opts: MakroClientOptions = {}) {
     this.store = opts.store ?? new FileSessionStore();
@@ -266,6 +310,92 @@ export class MakroClient {
     return this.run((http, ctx) => getProductByVariant(http, ctx, variantId));
   }
 
+  /**
+   * Search, retrying with progressively looser query variants until something
+   * hits (handles Polish declension and small typos). Returns the variant that
+   * worked plus the full list of variants tried.
+   */
+  async searchProductsFuzzy(query: string, opts?: SearchOptions): Promise<FuzzySearch> {
+    const tried: string[] = [];
+    for (const q of fuzzyQueries(query)) {
+      tried.push(q);
+      const products = await this.searchProducts(q, opts);
+      if (products.length) return { query: q, products, tried };
+    }
+    return { query, products: [], tried };
+  }
+
+  // --- history & discovery -------------------------------------------------
+
+  /**
+   * The customer's recently-bought products, resolved to names/prices. Cached in
+   * memory for 24h (the list barely changes day-to-day); pass `refresh` to bust.
+   */
+  async getRecentlyBought(opts?: { limit?: number; refresh?: boolean }): Promise<Product[]> {
+    const fresh = this.recentlyBought && Date.now() - this.recentlyBought.at < RECENTLY_BOUGHT_TTL_MS;
+    if (!opts?.refresh && fresh) return slice(this.recentlyBought!.items, opts?.limit);
+
+    const items = await this.run(async (http, ctx) => {
+      const raw = await listRecentlyBought(http, ctx);
+      const bundleIds = raw.map((r) => r.bundleId);
+      const byBundle = new Map<string, Product>();
+      for (let i = 0; i < bundleIds.length; i += RESOLVE_CHUNK) {
+        const chunk = bundleIds.slice(i, i + RESOLVE_CHUNK);
+        for (const [id, p] of await resolveBundles(http, ctx, chunk)) byBundle.set(id, p);
+      }
+      // Preserve the recently-bought order (most recent first).
+      return raw.map((r) => byBundle.get(r.bundleId)).filter((p): p is Product => Boolean(p));
+    });
+
+    this.recentlyBought = { at: Date.now(), items };
+    return slice(items, opts?.limit);
+  }
+
+  /**
+   * Resolve a loose request against cart → recently-bought → fuzzy search, in
+   * that priority. Read-only: returns what was found and the best pick; the
+   * caller adds to the cart and asks the user about quantity/alternatives.
+   */
+  async findItem(query: string, opts?: { limit?: number }): Promise<FindResult> {
+    const limit = opts?.limit ?? 6;
+    const [cart, recent] = await Promise.all([
+      this.getCurrentCart().catch(() => null),
+      this.getRecentlyBought().catch(() => [] as Product[]),
+    ]);
+
+    const inCart = (cart?.items ?? []).filter((it) => strongMatch(query, it.name));
+    const recentlyBought = rankByMatchThenPrice(query, recent.filter((p) => strongMatch(query, p.name))).slice(0, limit);
+
+    const { products, tried } = await this.searchProductsFuzzy(query, { rows: 12 });
+    const ranked = rankByMatchThenPrice(query, products);
+
+    const best = recentlyBought[0] ?? ranked[0] ?? null;
+    // Offer other recently-bought matches first (what they actually buy), then
+    // the best search hits — de-duped, minus whatever we picked as `best`.
+    const alternatives = uniqueByBundle([...recentlyBought, ...ranked])
+      .filter((p) => p.bundleId !== best?.bundleId)
+      .slice(0, 3);
+    const source: FindResult["source"] = inCart.length
+      ? "cart"
+      : recentlyBought.length
+        ? "recent"
+        : ranked.length
+          ? "search"
+          : "none";
+
+    return { query, source, inCart, recentlyBought, best, alternatives, triedQueries: tried };
+  }
+
+  /** List past orders, newest first. Page with the returned `nextCursor`. */
+  async getOrders(opts?: { rows?: number; cursor?: string | null }): Promise<OrderList> {
+    return this.run((http, ctx) => listOrders(http, ctx, opts ?? {}));
+  }
+
+  /** Full line items + totals for one past order. */
+  async getOrderDetails(orderId: string): Promise<OrderDetails> {
+    return this.run((http, ctx) => runGetOrderDetails(http, ctx, orderId));
+  }
+
   // --- cart operations -----------------------------------------------------
 
   async getCurrentCart(): Promise<Cart> {
@@ -307,13 +437,28 @@ export class MakroClient {
     });
   }
 
-  // --- order (stub until checkout HAR is provided) -------------------------
+  // --- order ---------------------------------------------------------------
 
-  async placeOrder(params: PlaceOrderParams): Promise<OrderResult> {
+  /**
+   * Place an order from the current cart (cash on delivery). IRREVERSIBLE —
+   * confirm with the user first. Pass `dryRun` to run checkout up to, but not
+   * including, the final submit. Not auto-retried, to avoid double submission.
+   */
+  async placeOrder(params: Partial<PlaceOrderParams> = {}): Promise<OrderResult> {
     const { http, ctx } = await this.reqCtx();
-    return runPlaceOrder(http, ctx, params);
+    const cart = await cartApi.getCurrentCart(http, ctx);
+    if (!cart.cartId) throw new MakroError("No active cart to order.");
+    if (!cart.items.length) throw new MakroError("Cart is empty — nothing to order.");
+    return runPlaceOrder(http, ctx, {
+      cartId: cart.cartId,
+      fsdAddressId: cart.fsdAddressId ?? ctx.fsdAddressId,
+      deliveryDate: params.deliveryDate,
+      dryRun: params.dryRun,
+    });
   }
 }
+
+const slice = <T>(arr: T[], limit?: number): T[] => (limit ? arr.slice(0, limit) : arr);
 
 /** A 401/403 from a data call means the session is no longer authenticated. */
 function isAuthFailure(e: unknown): boolean {
